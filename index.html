@@ -60,6 +60,7 @@
         <div class="mb-8">
             <h1 class="app-title text-4xl text-center mb-2">Lifehack</h1>
             <p class="text-center text-gray-300 mb-6">A collection of smart tips to simplify your life.</p>
+            <p id="userIdDisplay" class="text-xs text-gray-400 text-center"></p>
         </div>
         
         <!-- Main content area -->
@@ -86,16 +87,16 @@
     </div>
 
     <script type="module">
-        let settings = {
-            username: localStorage.getItem('username') || '',
-            baseValue: localStorage.getItem('baseValue') || ''
-        };
-        let items = JSON.parse(localStorage.getItem('items')) || [];
-        let dailyTotal = parseInt(localStorage.getItem('dailyTotal')) || 0;
-        let completedItems = JSON.parse(localStorage.getItem('completedItems')) || [];
-        let lastLoginDate = localStorage.getItem('lastLoginDate') || '';
-        let dailyHistory = JSON.parse(localStorage.getItem('dailyHistory')) || [];
-
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, onAuthStateChanged, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, query, onSnapshot, addDoc, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        setLogLevel('debug');
+        
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
         // UI elements
         const welcomePage = document.getElementById('welcomePage');
         const mainApp = document.getElementById('mainApp');
@@ -112,6 +113,20 @@
         const usernameInputEl = document.getElementById('usernameInput');
         const baseValueInputEl = document.getElementById('baseValueInput');
         const startAppBtn = document.getElementById('startAppBtn');
+        const userIdDisplay = document.getElementById('userIdDisplay');
+
+        let app, db, auth, userId, userDocRef;
+        let isAuthReady = false;
+
+        let settings = {
+            username: '',
+            baseValue: '',
+            resetTime: '00:00'
+        };
+        let items = [];
+        let dailyTotal = 0;
+        let completedItems = [];
+        let dailyHistory = [];
 
         const motivationalQuotes = [
             "Motivation is what gets you started. Habit is what keeps you going.",
@@ -131,32 +146,40 @@
             modalMessage.textContent = '';
         };
 
-        const saveDailyTotal = () => {
+        const saveDailyTotal = async () => {
             if (dailyTotal === 0) {
                 showModal('Daily total is zero. No data to save.');
                 return;
             }
             try {
-                const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }).replace(/\//g, '-');
-                
-                // Check if a score for today already exists
-                const existingIndex = dailyHistory.findIndex(entry => entry.date === today);
-                if (existingIndex > -1) {
-                    dailyHistory[existingIndex].score = dailyTotal;
-                } else {
-                    dailyHistory.push({ date: today, score: dailyTotal });
+                if (!userId) {
+                    showModal("Authentication not ready. Please try again.");
+                    return;
                 }
-                localStorage.setItem('dailyHistory', JSON.stringify(dailyHistory));
+                const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }).replace(/\//g, '-');
+                const historyCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/dailyHistory`);
+                
+                // Firestore doesn't have a direct 'update if exists, otherwise add' method like we had with localStorage.
+                // We'll query to see if a document for today's date already exists.
+                const todayDocRef = doc(historyCollectionRef, today);
+                const docSnap = await getDoc(todayDocRef);
+
+                if (docSnap.exists()) {
+                    await updateDoc(todayDocRef, { score: dailyTotal });
+                } else {
+                    await setDoc(todayDocRef, { score: dailyTotal, date: today });
+                }
                 showModal(`Daily total of ${dailyTotal} has been saved!`);
             } catch (error) {
                 console.error('Error saving daily total:', error);
                 showModal(`Error saving daily total: ${error.message}`);
             }
         };
-        
+
         const fetchAndRenderHistory = () => {
             const historyContainer = document.getElementById('historyContent');
-            
+            if (!historyContainer) return; // Check if the element exists
+
             if (dailyHistory.length > 0) {
                 historyContainer.innerHTML = '';
                 
@@ -250,34 +273,44 @@
                 pageContent.innerHTML = contentHtml;
 
                 document.querySelectorAll('[data-points]').forEach(itemEl => {
-                    itemEl.addEventListener('click', () => {
+                    itemEl.addEventListener('click', async () => {
+                        if (!isAuthReady) {
+                            showModal("Authentication not ready. Please wait a moment.");
+                            return;
+                        }
                         const index = parseInt(itemEl.getAttribute('data-index'));
-                        // Check if the item has already been completed today
                         if (!completedItems.includes(index)) {
                             const pointsToAdd = parseInt(itemEl.getAttribute('data-points'));
                             dailyTotal += pointsToAdd;
                             completedItems.push(index);
-                            localStorage.setItem('dailyTotal', dailyTotal);
-                            localStorage.setItem('completedItems', JSON.stringify(completedItems));
-                            
-                            document.getElementById('dailyTotal').textContent = dailyTotal;
-                            itemEl.classList.remove('bg-purple-500', 'bg-opacity-30', 'border-purple-700', 'cursor-pointer', 'hover:bg-opacity-50');
-                            itemEl.classList.add('bg-green-700', 'bg-opacity-50', 'border-green-500', 'cursor-default');
-                            itemEl.querySelector('span:last-child').textContent = '✓ Completed';
-                            itemEl.querySelector('span:last-child').classList.remove('text-turquoise-400');
-                            itemEl.querySelector('span:last-child').classList.add('text-white');
+
+                            try {
+                                await updateDoc(userDocRef, {
+                                    dailyTotal: dailyTotal,
+                                    completedItems: completedItems
+                                });
+                            } catch (e) {
+                                console.error("Error updating daily total:", e);
+                                showModal("Failed to update daily total. Please try again.");
+                            }
                         }
                     });
                 });
                 
                 document.getElementById('editItemsBtn').addEventListener('click', renderEditMode);
                 document.getElementById('saveTotalBtn').addEventListener('click', saveDailyTotal);
-                document.getElementById('resetTotalBtn').addEventListener('click', () => {
+                document.getElementById('resetTotalBtn').addEventListener('click', async () => {
                     dailyTotal = 0;
                     completedItems = [];
-                    localStorage.setItem('dailyTotal', dailyTotal);
-                    localStorage.setItem('completedItems', JSON.stringify(completedItems));
-                    renderItemsPage(); // Re-render the page to reflect the reset
+                    try {
+                        await updateDoc(userDocRef, {
+                            dailyTotal: dailyTotal,
+                            completedItems: completedItems
+                        });
+                    } catch (e) {
+                         console.error("Error resetting daily total:", e);
+                         showModal("Failed to reset daily total. Please try again.");
+                    }
                 });
             };
 
@@ -330,7 +363,7 @@
                     itemInputsContainer.appendChild(newItemInputDiv);
                 });
                 
-                document.getElementById('saveItemsBtn').addEventListener('click', () => {
+                document.getElementById('saveItemsBtn').addEventListener('click', async () => {
                     const newItems = [];
                     document.querySelectorAll('#item-inputs > div').forEach(div => {
                         const textInput = div.querySelector('.item-text');
@@ -343,19 +376,33 @@
                         }
                     });
                     items = newItems;
-                    localStorage.setItem('items', JSON.stringify(items));
-                    renderDisplayMode();
+                    try {
+                        await updateDoc(userDocRef, {
+                            items: JSON.stringify(items)
+                        });
+                        renderDisplayMode();
+                    } catch (e) {
+                         console.error("Error saving items:", e);
+                         showModal("Failed to save items. Please try again.");
+                    }
                 });
 
-                document.getElementById('item-inputs').addEventListener('click', (e) => {
+                document.getElementById('item-inputs').addEventListener('click', async (e) => {
                     const deleteBtn = e.target.closest('.delete-btn');
                     if (deleteBtn) {
                         const itemDiv = deleteBtn.closest('[data-index]');
                         if (itemDiv) {
                             const index = parseInt(itemDiv.dataset.index);
                             items.splice(index, 1);
-                            localStorage.setItem('items', JSON.stringify(items));
-                            renderEditMode(); // Re-render to update indices and the UI
+                            try {
+                                await updateDoc(userDocRef, {
+                                    items: JSON.stringify(items)
+                                });
+                                renderEditMode();
+                            } catch (e) {
+                                console.error("Error deleting item:", e);
+                                showModal("Failed to delete item. Please try again.");
+                            }
                         }
                     }
                 });
@@ -372,8 +419,8 @@
             pageContent.innerHTML = '';
             
             if (page === 'home') {
-                const baseTargetScore = localStorage.getItem('baseValue') || 'Not set';
-                const username = localStorage.getItem('username') || 'User';
+                const baseTargetScore = settings.baseValue || 'Not set';
+                const username = settings.username || 'User';
 
                 const homeHtml = `
                     <div id="homePageContent">
@@ -431,20 +478,24 @@
                                 <p class="text-xl">Base Value:</p>
                                 <p id="baseValueDisplay" class="font-semibold text-turquoise-400 text-xl">${settings.baseValue || 'Not set'}</p>
                             </div>
+                            <div class="flex items-center justify-between">
+                                <p class="text-xl">Daily Reset Time:</p>
+                                <p id="resetTimeDisplay" class="font-semibold text-turquoise-400 text-xl">${settings.resetTime}</p>
+                            </div>
                         </div>
 
                         <div id="editMode" class="hidden mt-8 space-y-6">
                             <div class="flex flex-col gap-2">
-                                <label for="baseValueInput" class="text-left text-lg">Maintain Base Value</label>
-                                <div class="flex gap-4">
-                                    <input type="number" id="baseValueInputSettings" placeholder="Enter base value" class="flex-grow p-2 rounded-lg border border-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-400 bg-purple-900 text-gray-100 placeholder-gray-400" value="${settings.baseValue}" />
-                                </div>
+                                <label for="usernameInputSettings" class="text-left text-lg">Maintain Username</label>
+                                <input type="text" id="usernameInputSettings" placeholder="Enter new username" class="flex-grow p-2 rounded-lg border border-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-400 bg-purple-900 text-gray-100 placeholder-gray-400" value="${settings.username}" />
                             </div>
                             <div class="flex flex-col gap-2">
-                                <label for="usernameInput" class="text-left text-lg">Maintain Username</label>
-                                <div class="flex gap-4">
-                                    <input type="text" id="usernameInputSettings" placeholder="Enter new username" class="flex-grow p-2 rounded-lg border border-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-400 bg-purple-900 text-gray-100 placeholder-gray-400" value="${settings.username}" />
-                                </div>
+                                <label for="baseValueInputSettings" class="text-left text-lg">Maintain Base Value</label>
+                                <input type="number" id="baseValueInputSettings" placeholder="Enter base value" class="flex-grow p-2 rounded-lg border border-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-400 bg-purple-900 text-gray-100 placeholder-gray-400" value="${settings.baseValue}" />
+                            </div>
+                            <div class="flex flex-col gap-2">
+                                <label for="resetTimeInput" class="text-left text-lg">Daily Reset Time</label>
+                                <input type="time" id="resetTimeInput" class="p-2 rounded-lg border border-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-400 bg-purple-900 text-gray-100 placeholder-gray-400" value="${settings.resetTime}" />
                             </div>
                         </div>
                     </div>
@@ -455,23 +506,36 @@
                  const editMode = document.getElementById('editMode');
                  const baseValueInputSettings = document.getElementById('baseValueInputSettings');
                  const usernameInputSettings = document.getElementById('usernameInputSettings');
+                 const resetTimeInput = document.getElementById('resetTimeInput');
                  
                  let isEditing = false;
                  
-                 const toggleEditMode = () => {
+                 const toggleEditMode = async () => {
                      isEditing = !isEditing;
                      if (isEditing) {
                          displayMode.classList.add('hidden');
                          editMode.classList.remove('hidden');
                          editBtn.innerHTML = '<button id="doneSettingsBtn" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition-colors">Done</button>';
                      } else {
-                         settings.baseValue = baseValueInputSettings.value;
-                         settings.username = usernameInputSettings.value;
-                         localStorage.setItem('baseValue', settings.baseValue);
-                         localStorage.setItem('username', settings.username);
-                         document.getElementById('usernameDisplay').textContent = settings.username;
-                         document.getElementById('baseValueDisplay').textContent = settings.baseValue || 'Not set';
-
+                         const newSettings = {
+                             baseValue: baseValueInputSettings.value,
+                             username: usernameInputSettings.value,
+                             resetTime: resetTimeInput.value
+                         };
+                         settings.baseValue = newSettings.baseValue;
+                         settings.username = newSettings.username;
+                         settings.resetTime = newSettings.resetTime;
+                         
+                         try {
+                             await setDoc(userDocRef, { settings: newSettings }, { merge: true });
+                             document.getElementById('usernameDisplay').textContent = newSettings.username;
+                             document.getElementById('baseValueDisplay').textContent = newSettings.baseValue || 'Not set';
+                             document.getElementById('resetTimeDisplay').textContent = newSettings.resetTime;
+                         } catch (e) {
+                             console.error("Error updating settings:", e);
+                             showModal("Failed to save settings. Please try again.");
+                         }
+                         
                          displayMode.classList.remove('hidden');
                          editMode.classList.add('hidden');
                          editBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -492,64 +556,177 @@
             renderPage('home');
         };
 
+        // Firebase Initialization and Authentication
+        const initFirebase = async () => {
+            try {
+                if (!firebaseConfig.apiKey) {
+                    showModal("Firebase config is missing. Please ensure your environment is set up correctly.");
+                    return;
+                }
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // The onAuthStateChanged listener is the single entry point for authenticated users.
+                // It correctly waits for Firebase Auth to be initialized before executing.
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        userIdDisplay.textContent = `User ID: ${userId}`;
+                        userDocRef = doc(db, `artifacts/${appId}/users/${userId}/data/userData`);
+
+                        const docSnap = await getDoc(userDocRef);
+                        if (docSnap.exists() && docSnap.data().settings?.username && docSnap.data().settings?.baseValue) {
+                            const { username } = docSnap.data().settings;
+                            welcomeMessageEl.textContent = `Welcome ${username}!`;
+                            const randomQuote = motivationalQuotes[Math.floor(Math.random() * motivationalQuotes.length)];
+                            quoteTextEl.textContent = randomQuote;
+                            
+                            const welcomeTimeout = setTimeout(goToMainApp, 1000); // 1 seconds timeout
+                            const skipWelcome = () => {
+                                clearTimeout(welcomeTimeout);
+                                goToMainApp();
+                            };
+                            welcomePage.addEventListener('click', skipWelcome);
+                            welcomePage.addEventListener('touchstart', skipWelcome);
+
+                        } else {
+                            welcomeMessageEl.textContent = `Welcome!`;
+                            const randomQuote = motivationalQuotes[Math.floor(Math.random() * motivationalQuotes.length)];
+                            quoteTextEl.textContent = randomQuote;
+                            welcomeInputsEl.classList.remove('hidden');
+
+                            startAppBtn.addEventListener('click', async () => {
+                                const newUsername = usernameInputEl.value.trim();
+                                const newBaseValue = baseValueInputEl.value.trim();
+                                
+                                if (newUsername && newBaseValue) {
+                                    try {
+                                        await setDoc(userDocRef, {
+                                            settings: { 
+                                                username: newUsername, 
+                                                baseValue: newBaseValue,
+                                                resetTime: '00:00'
+                                            },
+                                            dailyTotal: 0,
+                                            completedItems: [],
+                                            items: JSON.stringify([]),
+                                            lastResetDate: new Date().toDateString()
+                                        }, { merge: true });
+                                        goToMainApp();
+                                    } catch (e) {
+                                        console.error("Error saving initial settings:", e);
+                                        showModal("Failed to start app. Please try again.");
+                                    }
+                                } else {
+                                    showModal('Please enter both a username and a daily target score to get started.');
+                                }
+                            });
+                        }
+
+                        await setupFirestoreListeners();
+                        isAuthReady = true;
+
+                    } else {
+                        // Handle sign-out state if necessary
+                        console.log("User signed out.");
+                        isAuthReady = false;
+                    }
+                });
+
+            } catch (e) {
+                console.error("Error initializing Firebase:", e);
+                showModal(`Firebase initialization failed: ${e.message}`);
+            }
+        };
+
+        const setupFirestoreListeners = async () => {
+            const docSnap = await getDoc(userDocRef);
+            if (!docSnap.exists()) {
+                 const docData = {
+                    settings: {
+                        username: "",
+                        baseValue: "",
+                        resetTime: '00:00'
+                    },
+                    items: JSON.stringify([]),
+                    dailyTotal: 0,
+                    completedItems: [],
+                    lastResetDate: new Date().toDateString()
+                };
+                await setDoc(userDocRef, docData);
+            }
+
+            onSnapshot(userDocRef, (doc) => {
+                const data = doc.data();
+                if (data) {
+                    settings.username = data.settings?.username || '';
+                    settings.baseValue = data.settings?.baseValue || '';
+                    settings.resetTime = data.settings?.resetTime || '00:00';
+                    items = data.items ? JSON.parse(data.items) : [];
+                    dailyTotal = data.dailyTotal || 0;
+                    completedItems = data.completedItems || [];
+                    const lastResetDate = data.lastResetDate;
+                    const today = new Date().toDateString();
+                    const now = new Date();
+                    const [resetHour, resetMinute] = settings.resetTime.split(':').map(Number);
+                    const resetTimeToday = new Date();
+                    resetTimeToday.setHours(resetHour, resetMinute, 0, 0);
+
+                    // Logic to check if a reset should occur
+                    let shouldReset = false;
+                    const lastResetDateObj = new Date(lastResetDate);
+                    
+                    // Case 1: The app hasn't been used since the last calendar day.
+                    if (lastResetDate !== today) {
+                        shouldReset = true;
+                    }
+                    // Case 2: The app was used today, but it was before the reset time, and now it's after.
+                    else if (now.getTime() >= resetTimeToday.getTime()) {
+                         const lastResetTimeObj = new Date(lastResetDateObj);
+                         lastResetTimeObj.setHours(resetHour, resetMinute, 0, 0);
+                         if(now.getTime() > lastResetTimeObj.getTime()) {
+                             shouldReset = true;
+                         }
+                    }
+
+                    if (shouldReset) {
+                        dailyTotal = 0;
+                        completedItems = [];
+                        updateDoc(userDocRef, { dailyTotal: 0, completedItems: [], lastResetDate: today });
+                    }
+                }
+            }, (error) => {
+                console.error("Error listening to user data:", error);
+                showModal("Failed to load user data. Please check your connection.");
+            });
+
+            onSnapshot(collection(db, `artifacts/${appId}/users/${userId}/dailyHistory`), (snapshot) => {
+                const historyData = [];
+                snapshot.forEach((doc) => {
+                    historyData.push(doc.data());
+                });
+                dailyHistory = historyData;
+                fetchAndRenderHistory();
+            }, (error) => {
+                console.error("Error listening to daily history:", error);
+                showModal("Failed to load history data.");
+            });
+        };
+
         window.onload = function() {
             closeButton.addEventListener('click', closeModal);
             homeBtn.addEventListener('click', () => renderPage('home'));
             historyBtn.addEventListener('click', () => renderPage('history'));
             settingsBtn.addEventListener('click', () => renderPage('settings'));
 
-            // Daily reset logic
-            const today = new Date().toDateString();
-            if (lastLoginDate !== today) {
-                dailyTotal = 0;
-                completedItems = [];
-                localStorage.setItem('dailyTotal', dailyTotal);
-                localStorage.setItem('completedItems', JSON.stringify(completedItems));
-                localStorage.setItem('lastLoginDate', today);
-            }
-
-            // Check if username and baseValue exist in localStorage
-            const username = localStorage.getItem('username');
-            const baseValue = localStorage.getItem('baseValue');
-
-            if (!username || !baseValue) {
-                // If either is missing, show welcome page with input fields
-                welcomeMessageEl.textContent = `Welcome!`;
-                const randomQuote = motivationalQuotes[Math.floor(Math.random() * motivationalQuotes.length)];
-                quoteTextEl.textContent = randomQuote;
-                welcomeInputsEl.classList.remove('hidden');
-
-                startAppBtn.addEventListener('click', () => {
-                    const newUsername = usernameInputEl.value.trim();
-                    const newBaseValue = baseValueInputEl.value.trim();
-                    
-                    if (newUsername && newBaseValue) {
-                        localStorage.setItem('username', newUsername);
-                        localStorage.setItem('baseValue', newBaseValue);
-                        // FIX: Update the settings object in memory
-                        settings.username = newUsername;
-                        settings.baseValue = newBaseValue;
-                        goToMainApp();
-                    } else {
-                        showModal('Please enter both a username and a daily target score to get started.');
-                    }
-                });
-
-            } else {
-                // If both are present, show the standard welcome page
-                welcomeMessageEl.textContent = `Welcome ${username}!`;
-                const randomQuote = motivationalQuotes[Math.floor(Math.random() * motivationalQuotes.length)];
-                quoteTextEl.textContent = randomQuote;
-
-                const welcomeTimeout = setTimeout(goToMainApp, 1000); // 1 seconds timeout
-
-                const skipWelcome = () => {
-                    clearTimeout(welcomeTimeout);
-                    goToMainApp();
-                };
-                welcomePage.addEventListener('click', skipWelcome);
-                welcomePage.addEventListener('touchstart', skipWelcome);
-            }
+            initFirebase();
         };
     </script>
 </body>
