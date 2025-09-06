@@ -93,9 +93,17 @@
         import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         setLogLevel('debug');
         
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        const firebaseConfig = {
+            apiKey: "AIzaSyBKTebSk-YmB2rUvk5H5RlGNUApoJyXqRA",
+            authDomain: "my-lifehack-app.firebaseapp.com",
+            projectId: "my-lifehack-app",
+            storageBucket: "my-lifehack-app.firebasestorage.app",
+            messagingSenderId: "433187392211",
+            appId: "1:433187392211:web:214ff945e898932a812226",
+            measurementId: "YOUR_MEASUREMENT_ID"
+        };
+        const appId = firebaseConfig.appId;
+        const initialAuthToken = null;
         
         // UI elements
         const welcomePage = document.getElementById('welcomePage');
